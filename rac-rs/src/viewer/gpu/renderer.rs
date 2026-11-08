@@ -12,8 +12,8 @@
 //! 187 fps against Vulkan's 232 at 1440p); latency 3 gave 238 with no tearing (scratch_dx12ab/HANDOFF.md).
 use super::*;
 
-/// The player's choice from the options file: Some(true) = DirectX 12, Some(false) = Vulkan, None = not chosen (Vulkan first, then wgpu's own order).
-fn chosen() -> Option<bool> {
+/// The player's choice from the options file: Some("dx12"), Some("vulkan"), Some("opengl"), or None = not chosen.
+fn chosen() -> Option<String> {
 	crate::retail::pcopts::PcOptions::load(&crate::retail::pcopts::file()).renderer
 }
 
@@ -34,33 +34,32 @@ fn dx12_compiler(dll: Option<String>) -> wgpu::Dx12Compiler {
 /// The backends for the file's choice: exactly that one, or wgpu's default set when nothing is chosen or `default_set` (the
 /// fallback after the chosen one found no adapter).
 #[cfg(not(target_os = "linux"))]
-fn backends_for(choice: Option<bool>, default_set: bool) -> wgpu::Backends {
+fn backends_for(choice: Option<&str>, default_set: bool) -> wgpu::Backends {
 	match choice {
-		Some(true) if !default_set => wgpu::Backends::DX12,
-		// Not chosen = Vulkan first, like the options file's documented default. Not wgpu's whole set: its DX12 start-up asks for
-		// IDXGIFactoryMedia, and ReShade 6.8.0's CreateDXGIFactory1 hook crashes on that (also when ReShade is only the Vulkan layer).
-		Some(false) | None if !default_set => wgpu::Backends::VULKAN,
-		_ => wgpu::Backends::default(),
+		Some("dx12") if !default_set => wgpu::Backends::DX12,
+		Some("vulkan") | None if !default_set => wgpu::Backends::VULKAN,
+		Some("opengl") if !default_set => wgpu::Backends::GL,
+		_ => wgpu::Backends::default() | wgpu::Backends::GL,
 	}
 }
 
 /// Linux: Vulkan is the only backend offered (the Renderer row is not shown either). A `renderer=dx12` line left in a shared options
 /// file is ignored; the second try after no Vulkan adapter is wgpu's own set.
 #[cfg(target_os = "linux")]
-fn backends_for(choice: Option<bool>, default_set: bool) -> wgpu::Backends {
+fn backends_for(choice: Option<&str>, default_set: bool) -> wgpu::Backends {
 	let _ = choice;
-	if default_set { wgpu::Backends::default() } else { wgpu::Backends::VULKAN }
+	if default_set { wgpu::Backends::default() | wgpu::Backends::GL } else { wgpu::Backends::VULKAN | wgpu::Backends::GL }
 }
 
 /// The instance descriptor, and whether DX12 can be opened with the old FXC compiler (no `dxcompiler.dll`, no WGPU_DX12_COMPILER=dxc):
 /// the compiler is named for every set that holds DX12 (also wgpu's default set of the fallback).
-fn descriptor(choice: Option<bool>, default_set: bool) -> (wgpu::InstanceDescriptor, bool) {
+fn descriptor(choice: Option<&str>, default_set: bool) -> (wgpu::InstanceDescriptor, bool) {
 	descriptor_for(choice, default_set, crate::wine::instance_flags())
 }
 
 /// `descriptor` with the extra instance flags given (`wine.rs`: under Wine the Vulkan adapter that wgpu would hide must stay visible,
 /// else the game found no Vulkan adapter there and fell back to DirectX 12 over vkd3d-proton, which crashed; GitHub #49).
-fn descriptor_for(choice: Option<bool>, default_set: bool, extra: wgpu::InstanceFlags) -> (wgpu::InstanceDescriptor, bool) {
+fn descriptor_for(choice: Option<&str>, default_set: bool, extra: wgpu::InstanceFlags) -> (wgpu::InstanceDescriptor, bool) {
 	let mut d = wgpu::InstanceDescriptor::new_without_display_handle();
 	d.backends = backends_for(choice, default_set);
 	d.flags |= extra; // before `with_env`: WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=0/1 still has the last word
@@ -178,9 +177,13 @@ fn named(instance: &wgpu::Instance, surface: &wgpu::Surface<'static>) -> Option<
 /// (so a stale `renderer=` line never leaves the player without a picture).
 pub(super) fn open(window: &Arc<Window>) -> (wgpu::Instance, wgpu::Surface<'static>, wgpu::Adapter) {
 	let choice = chosen();
-	crate::rtss_crash::note_backend(choice != Some(true)); // until the adapter is known (a freeze in the instance)
+	let choice_str = choice.as_deref();
+	let is_dx12 = choice_str == Some("dx12");
+	
+	crate::rtss_crash::note_backend(!is_dx12); // until the adapter is known (a freeze in the instance)
+	
 	let try_open = |default_set: bool| {
-		let (desc, fxc) = descriptor(choice, default_set);
+		let (desc, fxc) = descriptor(choice_str, default_set);
 		let (backends, flags) = (desc.backends, desc.flags);
 		let instance = wgpu::Instance::new(desc);
 		let surface = match instance.create_surface(window.clone()) {
@@ -213,7 +216,7 @@ pub(super) fn open(window: &Arc<Window>) -> (wgpu::Instance, wgpu::Surface<'stat
 		Some((instance, surface, adapter, fxc))
 	};
 	let found = try_open(false).or_else(|| {
-		eprintln!("gpu: no {} adapter on this PC, trying the default order", if choice == Some(true) { "DirectX 12" } else { "Vulkan" });
+		eprintln!("gpu: no {} adapter on this PC, trying the default order", choice_str.unwrap_or("Vulkan"));
 		try_open(true)
 	});
 	let (instance, surface, adapter, fxc) = found.expect("no GPU adapter");
@@ -243,12 +246,13 @@ mod tests {
 	#[test]
 	fn the_files_choice_picks_the_backends() {
 		#[cfg(not(target_os = "linux"))]
-		assert_eq!(backends_for(Some(true), false), wgpu::Backends::DX12);
+		assert_eq!(backends_for(Some("dx12"), false), wgpu::Backends::DX12);
 		#[cfg(target_os = "linux")]
-		assert_eq!(backends_for(Some(true), false), wgpu::Backends::VULKAN, "Linux has no DirectX 12 backend");
-		assert_eq!(backends_for(Some(false), false), wgpu::Backends::VULKAN);
-		assert_eq!(backends_for(None, false), wgpu::Backends::VULKAN, "not chosen: Vulkan first, never the DX12 start-up (ReShade crash)");
-		assert_eq!(backends_for(Some(true), true), wgpu::Backends::default(), "the fallback is wgpu's own order");
+		assert_eq!(backends_for(Some("dx12"), false), wgpu::Backends::VULKAN | wgpu::Backends::GL, "Linux has no DirectX 12 backend");
+		assert_eq!(backends_for(Some("vulkan"), false), wgpu::Backends::VULKAN | wgpu::Backends::GL);
+		assert_eq!(backends_for(Some("opengl"), false), wgpu::Backends::GL);
+		assert_eq!(backends_for(None, false), wgpu::Backends::VULKAN | wgpu::Backends::GL, "not chosen: Vulkan first, never the DX12 start-up (ReShade crash)");
+		assert_eq!(backends_for(Some("dx12"), true), wgpu::Backends::default() | wgpu::Backends::GL, "the fallback is wgpu's own order");
 		assert!(wgpu::Backends::default().contains(wgpu::Backends::VULKAN), "Vulkan stays in today's default set");
 	}
 

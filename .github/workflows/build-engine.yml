@@ -1,0 +1,47 @@
+name: Build Engine
+
+on:
+  workflow_dispatch: # Allows you to run this manually from the Actions tab
+  push:
+    tags:
+      - 'v*' # Runs automatically when you push a tag like v0.5.0-custom
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Engine
+        run: cargo build --release --manifest-path rac-rs/Cargo.toml
+
+      - name: Prepare Artifact
+        shell: pwsh
+        run: |
+          # Create a folder for the zip contents
+          New-Item -ItemType Directory -Force -Path release_folder
+          
+          # Copy the compiled exe (adjust path if necessary)
+          Copy-Item "rac-rs\target\release\rac-rs.exe" -Destination "release_folder\"
+          
+          # Copy any other necessary files (e.g., Setup scripts, assets) if required.
+          # For example: Copy-Item "rac-rs\assets\*" -Destination "release_folder\" -Recurse
+          
+          # Zip the folder
+          Compress-Archive -Path release_folder\* -DestinationPath rac-rs-custom.zip
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rac-rs-custom-build
+          path: rac-rs-custom.zip

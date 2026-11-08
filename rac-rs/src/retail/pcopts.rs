@@ -51,7 +51,7 @@
 //! hud=sharp         sharp original   (the HUD and menus drawn again at the window's resolution, no new art; original = the 512-wide picture;
 //!                   gscap/draw/gpu.rs, gpu.wgsl k_hd; Pause -> Options -> Graphics -> Picture -> HUD, applied at once; only on windows at least
 //!                   896 px tall (gscap.rs HD_MIN_PX_PER_ROW); RAC_HUD=original forces Original)
-//! renderer=vulkan   vulkan dx12     (Pause -> Options -> Graphics -> Screen -> Renderer: which graphics API the window uses, read before the window opens, so a
+//! renderer=vulkan   vulkan dx12 opengl     (Pause -> Options -> Graphics -> Screen -> Renderer: which graphics API the window uses, read before the window opens, so a
 //!                   change applies after a restart; missing = vulkan; WGPU_BACKEND still overrides; an outside launcher writes the same key;
 //!                   viewer/gpu/renderer.rs)
 //! intro=play       play skip        (Pause -> Options -> Graphics -> System -> Skip intro: skip ends the boot logo movie at once; play = retail's, the default; pcintro.rs)
@@ -198,8 +198,8 @@ pub struct PcOptions {
 	pub texfilter: Option<bool>,
 	/// HUD: Some(true) = Sharp (the HUD drawn again at the window's resolution, gscap/draw/gpu.rs), Some(false) = Original; None: Sharp.
 	pub hud: Option<bool>,
-	/// Graphics -> Screen -> Renderer: Some(true) = DirectX 12, Some(false) = Vulkan; None: Vulkan (the key says `vulkan` or `dx12`).
-	pub renderer: Option<bool>,
+	/// Graphics -> Screen -> Renderer: Some("vulkan"), Some("dx12"), Some("opengl"); None: Vulkan (the key says `vulkan`, `dx12`, or `opengl`).
+	pub renderer: Option<String>,
 	/// `intro=play|skip` (Some(true) = skip the boot logo movie; pcintro.rs).
 	pub intro: Option<bool>,
 	/// `skipcut=on|off` (Some(true) = a plain Start skips cutscenes; pcskip.rs). None = on.
@@ -318,7 +318,16 @@ impl PcOptions {
 		self.debug.unwrap_or(false)
 	}
 
-	/// The Renderer row with the default: Vulkan (false); true = DirectX 12.
+	/// The Renderer row with the default: Vulkan.
+	pub fn renderer_api(&self) -> &str {
+		self.renderer.as_deref().unwrap_or("vulkan")
+	}
+
+	/// Keep compatibility with old code that checks `renderer_dx12()`.
+	pub fn renderer_dx12(&self) -> bool {
+		self.renderer.as_deref() == Some("dx12")
+	}
+
 	/// `intro=skip`: the boot logo movie ends at once (missing = play, retail's).
 	pub fn intro_skip(&self) -> bool {
 		self.intro.unwrap_or(false)
@@ -327,10 +336,6 @@ impl PcOptions {
 	/// `skipcut=off`: retail's skip rule for movies, scenes and flights (missing = on: a plain Start skips them).
 	pub fn skipcut_on(&self) -> bool {
 		self.skipcut.unwrap_or(true)
-	}
-
-	pub fn renderer_dx12(&self) -> bool {
-		self.renderer.unwrap_or(false)
 	}
 
 	/// The HUD row with the default: Sharp.
@@ -485,7 +490,7 @@ impl PcOptions {
 				"clouds" => o.clouds = level_value(v),
 				"texfilter" => o.texfilter = flag(v, "smooth", "classic"),
 				"hud" => o.hud = flag(v, "sharp", "original"),
-				"renderer" => o.renderer = flag(v, "dx12", "vulkan"),
+				"renderer" => o.renderer = Some(v.to_ascii_lowercase()),
 				"intro" => o.intro = flag(v, "skip", "play"),
 				"skipcut" => o.skipcut = flag(v, "on", "off"),
 				"gscap_gpu" => o.gscap_gpu = flag(v, "auto", "off"),
@@ -591,8 +596,8 @@ impl PcOptions {
 		if let Some(t) = self.hud {
 			s += &format!("hud={}\n", if t { "sharp" } else { "original" });
 		}
-		if let Some(t) = self.renderer {
-			s += &format!("renderer={}\n", if t { "dx12" } else { "vulkan" });
+		if let Some(ref t) = self.renderer {
+			s += &format!("renderer={}\n", t);
 		}
 		if let Some(t) = self.intro {
 			s += &format!("intro={}\n", if t { "skip" } else { "play" });
@@ -685,9 +690,6 @@ mod tests {
 		let _ = std::fs::remove_dir_all(&d);
 	}
 
-	/// `renderer=vulkan|dx12` (the Renderer row; an outside launcher writes the same key): missing = Vulkan, case does not matter, a bad
-	/// value is ignored, the key is kept on rewrite.
-	/// `gscap_gpu=auto|off` and the guard's two notes (gscap_guard.rs): round trip, the other keys stay.
 	#[test]
 	fn the_gscap_gpu_keys() {
 		assert_eq!(PcOptions::parse("").gscap_gpu, None);
@@ -725,15 +727,17 @@ mod tests {
 
 	#[test]
 	fn the_renderer_key() {
-		assert!(!PcOptions::parse("").renderer_dx12(), "a new player starts on Vulkan");
-		assert_eq!(PcOptions::parse("renderer=dx12\n").renderer, Some(true));
+		assert_eq!(PcOptions::parse("").renderer_api(), "vulkan", "a new player starts on Vulkan");
+		assert_eq!(PcOptions::parse("renderer=dx12\n").renderer.as_deref(), Some("dx12"));
 		assert!(PcOptions::parse("renderer=DX12\n").renderer_dx12());
-		assert_eq!(PcOptions::parse("renderer=Vulkan\n").renderer, Some(false));
-		assert_eq!(PcOptions::parse("renderer=metal\n").renderer, None);
-		let o = PcOptions { renderer: Some(true), ..Default::default() };
+		assert_eq!(PcOptions::parse("renderer=Vulkan\n").renderer.as_deref(), Some("vulkan"));
+		assert_eq!(PcOptions::parse("renderer=opengl\n").renderer.as_deref(), Some("opengl"));
+		assert_eq!(PcOptions::parse("renderer=metal\n").renderer.as_deref(), Some("metal"));
+		let o = PcOptions { renderer: Some("dx12".to_string()), ..Default::default() };
 		assert_eq!(o.to_text(), "version=1\nrenderer=dx12\n");
 		assert_eq!(PcOptions::parse(&o.to_text()), o);
-		assert_eq!(PcOptions { renderer: Some(false), ..Default::default() }.to_text(), "version=1\nrenderer=vulkan\n");
+		assert_eq!(PcOptions { renderer: Some("vulkan".to_string()), ..Default::default() }.to_text(), "version=1\nrenderer=vulkan\n");
+		assert_eq!(PcOptions { renderer: Some("opengl".to_string()), ..Default::default() }.to_text(), "version=1\nrenderer=opengl\n");
 		assert_eq!(PcOptions::new().to_text(), "version=1\n", "nothing is written until the player or the launcher chooses");
 	}
 
